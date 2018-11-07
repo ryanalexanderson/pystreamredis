@@ -1,0 +1,7 @@
+README.md
+setup.py
+pystreamredis/__init__.py
+pystreamredis.egg-info/PKG-INFO
+pystreamredis.egg-info/SOURCES.txt
+pystreamredis.egg-info/dependency_links.txt
+pystreamredis.egg-info/top_level.txt
