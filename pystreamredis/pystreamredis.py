@@ -1,14 +1,7 @@
 import logging
-import sys
-import functools
 from concurrent.futures import ThreadPoolExecutor
-import datetime
 import time
-from credis import Connection
-from credis.geventpool import ResourcePool
 from collections import deque
-
-from redis import StrictRedis
 
 logging.basicConfig(
          format='%(asctime)s %(levelname)-8s %(message)s',
