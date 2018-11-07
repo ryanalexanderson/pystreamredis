@@ -1,1 +1,2 @@
-name = "pystreamredis"
+from .pystreamredis import Streams
+
