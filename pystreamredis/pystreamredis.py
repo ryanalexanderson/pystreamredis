@@ -48,6 +48,16 @@ def xread(connection, streams, count=None, block=None, is_credis=False):
     return x
 
 
+def checkRedisBase(redis_conn):
+    execute_command = getattr(redis_conn, "execute", None)
+    if callable(execute_command):
+        return True
+    execute_command = getattr(redis_conn, "execute_command", None)
+    if callable(execute_command):
+        return False
+    raise ValueError("redis_conn must be a credis.Connection or a Redis.StrictRedis object.")
+
+
 class RedisError(Exception):
     pass
 
@@ -102,11 +112,7 @@ class Streams(object):
             else:
                 self.streams[k] = v
 
-        if not isinstance(redis_conn, Connection) and \
-           not isinstance(redis_conn, ResourcePool) and \
-           not isinstance(redis_conn, StrictRedis):
-            raise RedisError("Parameter 'redis_conn' must be a credis.Connection or a Redis.StrictRedis object.")
-        self.is_credis = not isinstance(redis_conn,StrictRedis)
+        self.is_credis = checkRedisBase(redis_conn)
         self.connection = redis_conn
         self.count = count
         self.timeout_response = timeout_response
