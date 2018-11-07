@@ -7,11 +7,14 @@ import time
 from credis import Connection
 from credis.geventpool import ResourcePool
 from collections import deque
+
+from redis import StrictRedis
+
 logging.basicConfig(
          format='%(asctime)s %(levelname)-8s %(message)s',
          level=logging.INFO)
 
-def xrevrange(connection, name, start='+', finish='-', count=None):
+def xrevrange(connection, name, start='+', finish='-', count=None, is_credis=False):
     pieces = [start, finish]
     if count is not None:
         if not isinstance(count, int) or count < 1:
@@ -19,9 +22,9 @@ def xrevrange(connection, name, start='+', finish='-', count=None):
         pieces.append("COUNT")
         pieces.append(str(count))
 
-    return connection.execute('XREVRANGE', name, *pieces)
+    return connection.execute('XREVRANGE', name, *pieces) if is_credis else connection.execute_command('XREVRANGE', name, *pieces)
 
-def xread(connection, streams, count=None, block=None):
+def xread(connection, streams, count=None, block=None, is_credis=False):
     pieces = []
     if block is not None:
         if not isinstance(block, int) or block < 1:
@@ -41,7 +44,7 @@ def xread(connection, streams, count=None, block=None):
         ids.append(partial_stream[1])
 
     pieces.extend(ids)
-    x = connection.execute('XREAD', *pieces)
+    x = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
     return x
 
 
@@ -99,8 +102,11 @@ class Streams(object):
             else:
                 self.streams[k] = v
 
-        if not isinstance(redis_conn,Connection) and not isinstance(redis_conn,ResourcePool):
-            raise RedisError("Parameter 'redis_conn' must be a credis.Connection.")
+        if not isinstance(redis_conn, Connection) and \
+           not isinstance(redis_conn, ResourcePool) and \
+           not isinstance(redis_conn, StrictRedis):
+            raise RedisError("Parameter 'redis_conn' must be a credis.Connection or a Redis.StrictRedis object.")
+        self.is_credis = not isinstance(redis_conn,StrictRedis)
         self.connection = redis_conn
         self.count = count
         self.timeout_response = timeout_response
@@ -149,21 +155,12 @@ class Streams(object):
         self.future_is_done = False
         self.ts_start_xread = time.time()
         logging.debug("Done:False")
-        r = xread(self.connection, {k: self.streams[k] for k in requestList}, self.count, self.block_int)
+        r = xread(self.connection, {k: self.streams[k] for k in requestList}, self.count, self.block_int, self.is_credis)
         logging.debug("Done:True")
         self.ts_last_xread = time.time()  # potential data race?
         #self.future_is_done = True
         self.future_streams_processed = False
         return r
-
-    def fill_buffer_dict(self, block=None):
-        if len(self.streams):
-            print("fill xread")
-            r = self.connection.xread(self.count, block, **self.streams)
-            return r
-        else: # You want to listen to nothing? Sure, why not.
-            time.sleep(self.block_int / 1000.0)
-            return None
 
     def update_last_and_limit(self): # might be deleteable
         if self.buffer_dict is not None:
@@ -183,7 +180,7 @@ class Streams(object):
                 next_index = next_index.decode()
 
             if next_index == "$" or next_index is None:
-                lastmsg = xrevrange(self.connection, stream_name, count=1)
+                lastmsg = xrevrange(self.connection, stream_name, count=1, is_credis=self.is_credis)
                 if lastmsg:
                     self.streams[stream_name] = lastmsg[0][0]
                 else:
