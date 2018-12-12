@@ -1,11 +1,16 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import time
-from collections import deque
+from collections import deque, Container, Mapping
+
+from sys import getsizeof
 
 logging.basicConfig(
          format='%(asctime)s %(levelname)-8s %(message)s',
          level=logging.INFO)
+
+log = logging.getLogger(__name__)
+
 
 def xrevrange(connection, name, start='+', finish='-', count=None, is_credis=False):
     pieces = [start, finish]
@@ -93,7 +98,7 @@ class Streams(object):
     if 'stop_on_timeout' is explicitly set. Redis Exceptions will be raised during iteration if stop_on_exception is
     True (otherwise, the exception will be returned but not raised).
     """
-    def __init__(self, redis_conn=None, streams=None, count=100, block=1000, timeout_response=None,
+    def __init__(self, redis_conn=None, streams=None, size=10000000, block=1000, timeout_response=None,
                  stop_on_timeout=False, raise_connection_exceptions=True, min_xread_interval=0.1, min_check_stream_interval=0, **kwargs):
         #cdef int block_int
         self.block_int = int(block) if block else 1
@@ -118,7 +123,6 @@ class Streams(object):
         self.streams, self.wildcard_streams = processStreams(streams, kwargs=kwargs)
         self.is_credis = checkRedisBase(redis_conn)
         self.connection = redis_conn
-        self.count = count
         self.timeout_response = timeout_response
         self.sanitize_stream_starts()
         self.sample_message_sizes = dict()
@@ -132,9 +136,15 @@ class Streams(object):
         self.future_streams_processed = False
         self.buffer_dict = {k:deque() for k in self.streams.keys()}
         self.empty_pull = False
-
+        self.desired_response_size = size
+        self.latest_response_size = 0
+        self.count = 100 # Placeholder to start
+        self.hit_zero_time = 0
         self.refresh_streams()
         self.update_last_and_limit()
+        self.counter = 0
+        self.perform_curve=deque(maxlen=20)
+        self.ts_end_xread = 0
 
     def refresh_streams(self, from_start=False):
         # from_start will override the default for the start time associated with the wildcard.
@@ -151,7 +161,7 @@ class Streams(object):
 
         new_streams = dict([(k,v) for k,v in zip(keys_to_add.keys(), pipe.execute()) if v == b'stream'])
         if len(new_streams):
-          logging.info(f"Adding streams: {new_streams}")
+          log.info(f"Adding streams: {new_streams}")
           self.streams.update(new_streams)
         return new_streams
 
@@ -161,13 +171,13 @@ class Streams(object):
           if result is not None:
               for incomingStreamBin, incomingList in result:
                 incomingStream=incomingStreamBin.decode()
-                logging.debug(f"Adding {len(incomingList)} entries to {incomingStream} (currently {len(self.buffer_dict[incomingStream])})")
+                log.debug(f"Adding {len(incomingList)} entries to {incomingStream} (currently {len(self.buffer_dict[incomingStream])})")
                 if len(incomingList):
                     self.buffer_dict[incomingStream]=self.buffer_dict.get(incomingStream,deque()) + deque(incomingList)
                     self.streams[incomingStream] = incomingList[-1][0]
                     if len(incomingList) == self.count:
                         self.topic_hit_limit.add(incomingStream)
-                logging.debug(f"Now have {len(self.buffer_dict[incomingStream])} entries in {incomingStream})")
+                log.debug(f"Now have {len(self.buffer_dict[incomingStream])} entries in {incomingStream})")
 
           self.future_streams_processed = True
 
@@ -175,9 +185,9 @@ class Streams(object):
         if len(requestList):
             self.future_streams = self.future_pool.submit(self.get_streams, requestList)
             self.future_streams.add_done_callback(self.updateFutureStatus)
-            logging.debug("submit stream")
+            log.debug("submit stream")
         else:
-            logging.debug("Not submitting stream")
+            log.debug("Not submitting stream")
 
     def updateFutureStatus(self, whatever):
         self.future_is_done = True
@@ -186,10 +196,29 @@ class Streams(object):
     def get_streams(self,requestList):
         self.future_is_done = False
         self.ts_start_xread = time.time()
-        logging.debug("Done:False")
+        log.debug(f"Done:False, count = {self.count}")
         r = xread(self.connection, {k: self.streams[k] for k in requestList}, self.count, self.block_int, self.is_credis)
+
+        # Calculate and explore count stats
+        new_end_xread = time.time() + 1e-8
+        rate = self.counter/(new_end_xread-self.ts_end_xread)
+        self.perform_curve.append((self.count,rate))
+        log.info(f"Count, Rate: {self.count, rate}")
+        if len(self.perform_curve)==1:
+            adjust = 0.25
+        elif len(self.perform_curve)<5:
+
+        self.counter=0
+        self.ts_end_xread = new_end_xread
+        self.latest_response_size = 40000#deep_getsizeof(r,set())
+        newcount = 4000 #int(max(1,self.desired_response_size/(self.latest_response_size/self.count)))
+
+        log.debug(f"read time: {time.time()-self.ts_start_xread}, time since last empty: {time.time()-self.hit_zero_time}")
+        log.debug(f"Changing count from {self.count} to {newcount}")
+        self.count = newcount
+
         self.empty_pull = r is None
-        logging.debug("Done:True")
+        log.debug("Done:True")
         self.ts_last_xread = time.time()  # potential data race?
         self.future_streams_processed = False
         return r
@@ -276,21 +305,25 @@ class Streams(object):
         if time.time() - self.ts_last_xread > self.minimum_interval_between_xreads:
            #print("Time to pull")
            if any([True for x in self.buffer_dict.values() if len(x) < self.count]):
+#              print("A")
               if self.minimum_interval_between_streamchecks and time.time() > self.minimum_interval_between_streamchecks:
+#                  print("B")
                   self.refresh_streams(from_start=True)
-              time.sleep(0) # Yield the thread
+              time.sleep(0.0000001) # Yield the thread
               if self.future_is_done:# future_streams.done():
               #if self.future_streams.done():
+#                 print("D")
                  self.process_future_update()
         (lowest_timestamp_str, lowest_index, lowest_stream) = self.get_lowest()
         if lowest_timestamp_str < self.BIG_NUMBER:
             entry = self.buffer_dict[lowest_stream].popleft()
+            self.counter = self.counter + 1
             return lowest_stream, entry[0], entry[1]
 
         if not hit_zero:
-            logging.debug("Buffer empty")
+            log.debug("Buffer empty")
             hit_zero=True
-            hit_zero_time = time.time()
+            self.hit_zero_time = time.time()
 
         else:
             if self.empty_pull: #1000*(time.time() - hit_zero_time) > self.block_int: # Timeout
@@ -305,3 +338,22 @@ class Streams(object):
 
     def __repr__(self):
         return "<redis.client.Streams monitoring %d streams on %s" % (len(self.streams), repr(self.connection))
+
+def deep_getsizeof(o, ids):
+    d = deep_getsizeof
+    if id(o) in ids:
+        return 0
+
+    r = getsizeof(o)
+    ids.add(id(o))
+
+    if isinstance(o, str) or isinstance(0, bytearray):
+        return r
+
+    if isinstance(o, Mapping):
+        return r + sum(d(k, ids) + d(v, ids) for k, v in o.iteritems())
+
+    if isinstance(o, Container):
+        return r + sum(d(x, ids) for x in o)
+
+    return r
