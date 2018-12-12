@@ -51,6 +51,35 @@ def checkRedisBase(redis_conn):
     raise ValueError("redis_conn must be a credis.Connection or a Redis.StrictRedis object.")
 
 
+def processStreams(streams, kwargs):
+    if isinstance(streams, str):
+        streams = [streams]
+
+    if streams is None:
+        if not len(kwargs):
+            raise RedisError("No streams specified, either in streams= or kwargs.")
+        streams = {}
+    elif isinstance(streams, set) or isinstance(streams, list):
+        streams = dict([(x, "$") for x in streams])
+    elif isinstance(streams, dict):
+        pass
+    else:
+        raise RedisError("streams must be a string, dict, set, list, or None.")
+    streamsout = {}
+    wildcards = {}
+    streams.update(kwargs)
+    for (k, v) in streams.items():
+
+        if isinstance(k, bytes):
+            streamsout[k.decode()] = v
+        else:
+            if 1 in [c in k for c in "*[]?"]:  # to do: Escape characters
+                wildcards[k] = v
+            else:
+                streamsout[k] = v
+    return streamsout, wildcards
+
+
 class RedisError(Exception):
     pass
 
@@ -65,7 +94,7 @@ class Streams(object):
     True (otherwise, the exception will be returned but not raised).
     """
     def __init__(self, redis_conn=None, streams=None, count=100, block=1000, timeout_response=None,
-                 stop_on_timeout=False, raise_connection_exceptions=True, **kwargs):
+                 stop_on_timeout=False, raise_connection_exceptions=True, min_xread_interval=0.1, min_check_stream_interval=0, **kwargs):
         #cdef int block_int
         self.block_int = int(block) if block else 1
 
@@ -73,7 +102,10 @@ class Streams(object):
         self.ts_last_xread = 0
 
         #cdef float minimum_interval_between_xreads
-        self.minimum_interval_between_xreads = 0.1
+        self.minimum_interval_between_xreads = min_xread_interval
+
+        #cdef float minimum_interval_between_streamchecks
+        self.minimum_interval_between_streamchecks = min_check_stream_interval
 
         #cdef float ts_start_xread
         self.ts_start_xread = 0
@@ -83,44 +115,45 @@ class Streams(object):
 
         self.BIG_NUMBER = b"99999999999999"
         self.topic_hit_limit = set()
-        if isinstance(streams, str):
-            streams=[streams]
-
-        if streams is None:
-            if not len(kwargs):
-                raise RedisError("No streams specified, either in streams= or kwargs.")
-            streams = {}
-        elif isinstance(streams, set) or isinstance(streams, list):
-            streams = dict([(x, "$") for x in streams])
-        elif isinstance(streams, dict):
-            pass
-        else:
-            raise RedisError("streams must be a string, dict, set, list, or None.")
-
-        self.streams = {}
-        streams.update(kwargs)
-        for (k,v) in streams.items():
-            if isinstance(k, bytes):
-                self.streams[k.decode()] = v
-            else:
-                self.streams[k] = v
-
+        self.streams, self.wildcard_streams = processStreams(streams, kwargs=kwargs)
         self.is_credis = checkRedisBase(redis_conn)
         self.connection = redis_conn
         self.count = count
         self.timeout_response = timeout_response
         self.sanitize_stream_starts()
-        self.buffer_dict = {k:deque() for k in self.streams.keys()}
         self.sample_message_sizes = dict()
         self.topic_hit_limit = set()
         self.remove_from_limit = list()
-        self.update_last_and_limit()
         self.stop_on_timeout = stop_on_timeout if block else True
         self.raise_connection_exceptions = raise_connection_exceptions
         self.connectionError = False
         self.future_pool = ThreadPoolExecutor(1)
         self.future_streams = self.future_pool.submit(lambda x: dict(), None)
         self.future_streams_processed = False
+        self.buffer_dict = {k:deque() for k in self.streams.keys()}
+        self.empty_pull = False
+
+        self.refresh_streams()
+        self.update_last_and_limit()
+
+    def refresh_streams(self, from_start=False):
+        # from_start will override the default for the start time associated with the wildcard.
+        # For refreshes done *after* the iterator has begun, odds are that you will not want to leave
+        # out the first couple stream records that occurred before the new stream was detected.
+        keys_to_add = {}
+        for thisWildCard, thisWildCardValue in self.wildcard_streams.items():
+            for key in self.connection.scan_iter(match=thisWildCard): # hope this isn't too big
+                if key not in self.streams:
+                    keys_to_add[key] = 0 if from_start else thisWildCardValue
+        pipe = self.connection.pipeline()
+        for k in keys_to_add.keys():
+            pipe.type(k)
+
+        new_streams = dict([(k,v) for k,v in zip(keys_to_add.keys(), pipe.execute()) if v == b'stream'])
+        if len(new_streams):
+          logging.info(f"Adding streams: {new_streams}")
+          self.streams.update(new_streams)
+        return new_streams
 
     def process_future_update(self):
         result = self.future_streams.result()
@@ -147,17 +180,17 @@ class Streams(object):
             logging.debug("Not submitting stream")
 
     def updateFutureStatus(self, whatever):
-        #print("Future is done")
         self.future_is_done = True
+
 
     def get_streams(self,requestList):
         self.future_is_done = False
         self.ts_start_xread = time.time()
         logging.debug("Done:False")
         r = xread(self.connection, {k: self.streams[k] for k in requestList}, self.count, self.block_int, self.is_credis)
+        self.empty_pull = r is None
         logging.debug("Done:True")
         self.ts_last_xread = time.time()  # potential data race?
-        #self.future_is_done = True
         self.future_streams_processed = False
         return r
 
@@ -237,12 +270,15 @@ class Streams(object):
         return self
 
     def __next__(self):
-      hit_zero=False
+      hit_zero = False
+      hit_zero_time = time.time()
       while True:
         if time.time() - self.ts_last_xread > self.minimum_interval_between_xreads:
            #print("Time to pull")
            if any([True for x in self.buffer_dict.values() if len(x) < self.count]):
-              time.sleep(0.0000001) # Can't explain why this speeds things up dramatically; threading thing, I suppose
+              if self.minimum_interval_between_streamchecks and time.time() > self.minimum_interval_between_streamchecks:
+                  self.refresh_streams(from_start=True)
+              time.sleep(0) # Yield the thread
               if self.future_is_done:# future_streams.done():
               #if self.future_streams.done():
                  self.process_future_update()
@@ -250,9 +286,20 @@ class Streams(object):
         if lowest_timestamp_str < self.BIG_NUMBER:
             entry = self.buffer_dict[lowest_stream].popleft()
             return lowest_stream, entry[0], entry[1]
-        elif not hit_zero:
+
+        if not hit_zero:
             logging.debug("Buffer empty")
             hit_zero=True
+            hit_zero_time = time.time()
+
+        else:
+            if self.empty_pull: #1000*(time.time() - hit_zero_time) > self.block_int: # Timeout
+                self.empty_pull = False
+                if self.stop_on_timeout:
+                    raise StopIteration
+                else:
+                    return self.timeout_response
+
 
         #print(lowest_timestamp_str, [(k,len(v)) for k,v in self.buffer_dict.items()])
 
