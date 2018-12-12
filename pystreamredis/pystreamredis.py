@@ -98,7 +98,7 @@ class Streams(object):
     if 'stop_on_timeout' is explicitly set. Redis Exceptions will be raised during iteration if stop_on_exception is
     True (otherwise, the exception will be returned but not raised).
     """
-    def __init__(self, redis_conn=None, streams=None, size=10000000, block=1000, timeout_response=None,
+    def __init__(self, redis_conn=None, streams=None, count=5000, block=1000, timeout_response=None,
                  stop_on_timeout=False, raise_connection_exceptions=True, min_xread_interval=0.1, min_check_stream_interval=0, **kwargs):
         #cdef int block_int
         self.block_int = int(block) if block else 1
@@ -136,9 +136,9 @@ class Streams(object):
         self.future_streams_processed = False
         self.buffer_dict = {k:deque() for k in self.streams.keys()}
         self.empty_pull = False
-        self.desired_response_size = size
+        self.desired_response_size = count #!!!
         self.latest_response_size = 0
-        self.count = 100 # Placeholder to start
+        self.count = count # Placeholder to start
         self.hit_zero_time = 0
         self.refresh_streams()
         self.update_last_and_limit()
@@ -207,15 +207,12 @@ class Streams(object):
         if len(self.perform_curve)==1:
             adjust = 0.25
         elif len(self.perform_curve)<5:
-
+            pass
         self.counter=0
         self.ts_end_xread = new_end_xread
-        self.latest_response_size = 40000#deep_getsizeof(r,set())
-        newcount = 4000 #int(max(1,self.desired_response_size/(self.latest_response_size/self.count)))
 
-        log.debug(f"read time: {time.time()-self.ts_start_xread}, time since last empty: {time.time()-self.hit_zero_time}")
-        log.debug(f"Changing count from {self.count} to {newcount}")
-        self.count = newcount
+#        log.debug(f"read time: {time.time()-self.ts_start_xread}, time since last empty: {time.time()-self.hit_zero_time}")
+#        log.debug(f"Changing count from {self.count} to {newcount}")
 
         self.empty_pull = r is None
         log.debug("Done:True")
