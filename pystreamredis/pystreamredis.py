@@ -214,7 +214,7 @@ class Streams(object):
 #        log.debug(f"read time: {time.time()-self.ts_start_xread}, time since last empty: {time.time()-self.hit_zero_time}")
 #        log.debug(f"Changing count from {self.count} to {newcount}")
 
-        self.empty_pull = r is None
+        self.empty_pull = r is None or not len(r)
         log.debug("Done:True")
         self.ts_last_xread = time.time()  # potential data race?
         self.future_streams_processed = False
