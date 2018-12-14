@@ -23,7 +23,7 @@ filename = streamname.split(":")[-1] + ".csv"
 
 with open(filename,"w") as fp:
     #for x in pystreamredis.Streams(conn,{"stream:tag:GEN:PR_WARM_WATER_TANK_TEMP_SCALED":0,"stream:tag:GEN:PR_BOILER_CONDENSATE_PRESS_SCALED":0}, count=fetchinterval):
-    for x in pystreamredis.Streams(conn,{streamname:1535081600000}, stop_on_timeout=False):
+    for x in pystreamredis.Streams(conn,[streamname], group="ryan",stop_on_timeout=False):
       try:
         counter = counter + 1
         #xx = json.loads(x[2][1])
