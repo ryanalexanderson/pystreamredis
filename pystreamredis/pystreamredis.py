@@ -170,7 +170,7 @@ class Streams(object):
         if not self.future_streams_processed:
           if result is not None:
               for incomingStreamBin, incomingList in result:
-                incomingStream=incomingStreamBin.decode()
+                incomingStream=incomingStreamBin.decode() if not isinstance(incomingStreamBin,str) else incomingStreamBin 
                 log.debug(f"Adding {len(incomingList)} entries to {incomingStream} (currently {len(self.buffer_dict[incomingStream])})")
                 if len(incomingList):
                     self.buffer_dict[incomingStream]=self.buffer_dict.get(incomingStream,deque()) + deque(incomingList)
@@ -203,7 +203,7 @@ class Streams(object):
         new_end_xread = time.time() + 1e-8
         rate = self.counter/(new_end_xread-self.ts_end_xread)
         self.perform_curve.append((self.count,rate))
-        log.info(f"Count, Rate: {self.count, rate}")
+        log.debug(f"Count, Rate: {self.count, rate}")
         if len(self.perform_curve)==1:
             adjust = 0.25
         elif len(self.perform_curve)<5:
