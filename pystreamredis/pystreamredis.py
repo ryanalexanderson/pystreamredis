@@ -7,6 +7,8 @@ from collections import deque, Container, Mapping
 
 from sys import getsizeof
 
+from redis import DataError
+
 logging.basicConfig(
          format='%(asctime)s %(levelname)-8s %(message)s',
          level=logging.INFO)
@@ -44,8 +46,34 @@ def xread(connection, streams, count=None, block=None, is_credis=False):
         ids.append(partial_stream[1])
 
     pieces.extend(ids)
-    x = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
-    return x
+    resp = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
+    return resp
+
+def xreadgroup(connection, groupname, consumername, streams, count=None,
+                   block=None, is_credis=False):
+        pieces = ['GROUP', groupname, consumername]
+        if count is not None:
+            if not isinstance(count, int) or count < 1:
+                raise DataError("XREADGROUP count must be a positive integer")
+            pieces.append("COUNT")
+            pieces.append(str(count))
+        if block is not None:
+            if not isinstance(block, int) or block < 0:
+                raise DataError("XREADGROUP block must be a non-negative "
+                                "integer")
+            pieces.append("BLOCK")
+            pieces.append(str(block))
+        if not isinstance(streams, dict) or len(streams) == 0:
+            raise DataError('XREADGROUP streams must be a non empty dict')
+        pieces.append('STREAMS')
+        pieces.extend(streams.keys())
+        pieces.extend(streams.values())
+
+        if is_credis:
+            resp = connection.execute('XREADGROUP', *pieces)
+        else:
+            resp = connection.execute_command('XREADGROUP', *pieces)
+        return resp
 
 
 def checkRedisBase(redis_conn):
@@ -58,7 +86,7 @@ def checkRedisBase(redis_conn):
     raise ValueError("redis_conn must be a credis.Connection or a Redis.StrictRedis object.")
 
 
-def processStreams(streams, kwargs):
+def processStreams(streams, kwargs, is_group=False, group_catchup=True):
     if isinstance(streams, str):
         streams = [streams]
 
@@ -100,8 +128,10 @@ class Streams(object):
     if 'stop_on_timeout' is explicitly set. Redis Exceptions will be raised during iteration if stop_on_exception is
     True (otherwise, the exception will be returned but not raised).
     """
-    def __init__(self, redis_conn=None, streams=None, count=5000, block=1000, timeout_response=None, group=None, consumer_name=None, no_ack=True,
-                 stop_on_timeout=False, raise_connection_exceptions=True, min_xread_interval=0.1, min_check_stream_interval=0, **kwargs):
+    def __init__(self, redis_conn=None, streams=None, count=5000, block=1000, timeout_response=None,
+                 group=None, consumer_name=None, no_ack=True, group_catchup=True,
+                 stop_on_timeout=False, raise_connection_exceptions=True,
+                 min_xread_interval=0.1, min_check_stream_interval=0, **kwargs):
         #cdef int block_int
         self.block_int = int(block) if block else 1
 
@@ -122,7 +152,9 @@ class Streams(object):
 
         self.BIG_NUMBER = b"99999999999999"
         self.topic_hit_limit = set()
-        self.streams, self.wildcard_streams = processStreams(streams, kwargs=kwargs)
+        self.streams, self.wildcard_streams = processStreams(streams, kwargs=kwargs,
+                                                             is_group= group is not None,
+                                                             group_catchup=group_catchup)
         self.is_credis = checkRedisBase(redis_conn)
         self.connection = redis_conn
         self.timeout_response = timeout_response
@@ -150,6 +182,8 @@ class Streams(object):
         self.no_ack = no_ack
         self.nack_flag = False
         self.group = group
+        self.group_cactchup = True
+        self.current_id = None
         if self.group is not None:
           if consumer_name is None:
               self.consumer_name = uuid.uuid4()
@@ -204,12 +238,17 @@ class Streams(object):
     def updateFutureStatus(self, whatever):
         self.future_is_done = True
 
-
     def get_streams(self,requestList):
         self.future_is_done = False
         self.ts_start_xread = time.time()
         log.debug("Done:False, count = " + str(self.count))
-        r = xread(self.connection, {k: self.streams[k] for k in requestList}, self.count, self.block_int, self.is_credis)
+        if self.group is None:
+            r = xread(self.connection, {k: self.streams[k] for k in requestList},
+                      self.count, self.block_int, self.is_credis)
+        else:
+            r = xreadgroup(self.connection, self.group, self.consumer_name,
+                           {k: self.streams[k] for k in requestList},
+                           self.count, self.block_int, self.is_credis)
 
         # Calculate and explore count stats
         new_end_xread = time.time() + 1e-8
@@ -286,6 +325,7 @@ class Streams(object):
                 self.topic_hit_limit.remove(remove_stream)
             self.remove_from_limit = []
 
+        # Perhaps bypass this bs if it's just one stream
         for stream_name, record_list in self.buffer_dict.items():
             if len(record_list):
                 if record_list[0][0][0:13] < lowest_timestamp_str:
@@ -298,37 +338,48 @@ class Streams(object):
                         lowest_stream = stream_name
         return lowest_timestamp_str, lowest_index, lowest_stream
 
+    def nack(self):
+        if self.current_id is None:
+            warnings.warn("No current item to nack.")
+            return
+        if self.no_ack:
+            warnings.warn("no_ack is set; nack command ignored.")
+            return
+        self.nack_flag = True
+
+
     def resolve_possible_connection_errors(self):
         if self.connectionError:
             print("Connection not working; credis restore not written")
-            #self.connection = StrictRedis(connection_pool=self.connection_pool)
-            #self.connectionError = False
 
     def __iter__(self):
         return self
 
     def __next__(self):
+      if not self.no_ack and self.group is not None:
+        if not self.nack_flag:
+            resp = self.connection.execute("XACK", self.current_id[0], self.current_id[1])
+        else:
+            self.nack_flag=False
+
       hit_zero = False
-      hit_zero_time = time.time()
       while True:
         if time.time() - self.ts_last_xread > self.minimum_interval_between_xreads:
            #print("Time to pull")
            if any([True for x in self.buffer_dict.values() if len(x) < self.count]):
-#              print("A")
               if self.minimum_interval_between_streamchecks and time.time() > self.minimum_interval_between_streamchecks:
-#                  print("B")
                   self.refresh_streams(from_start=True)
               time.sleep(0.0000001) # Yield the thread
               if self.future_is_done:# future_streams.done():
-              #if self.future_streams.done():
-#                 print("D")
                  self.process_future_update()
         (lowest_timestamp_str, lowest_index, lowest_stream) = self.get_lowest()
         if lowest_timestamp_str < self.BIG_NUMBER:
             entry = self.buffer_dict[lowest_stream].popleft()
             self.counter = self.counter + 1
+            self.current_id = (lowest_stream,entry[0])
             return lowest_stream, entry[0], entry[1]
 
+        self.current_id = None
         if not hit_zero:
             log.debug("Buffer empty")
             hit_zero=True
@@ -347,22 +398,3 @@ class Streams(object):
 
     def __repr__(self):
         return "<redis.client.Streams monitoring %d streams on %s" % (len(self.streams), repr(self.connection))
-
-def deep_getsizeof(o, ids):
-    d = deep_getsizeof
-    if id(o) in ids:
-        return 0
-
-    r = getsizeof(o)
-    ids.add(id(o))
-
-    if isinstance(o, str) or isinstance(0, bytearray):
-        return r
-
-    if isinstance(o, Mapping):
-        return r + sum(d(k, ids) + d(v, ids) for k, v in o.iteritems())
-
-    if isinstance(o, Container):
-        return r + sum(d(x, ids) for x in o)
-
-    return r
