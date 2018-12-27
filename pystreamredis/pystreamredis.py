@@ -50,7 +50,7 @@ def xread(connection, streams, count=None, block=None, is_credis=False):
     return resp
 
 def xreadgroup(connection, groupname, consumername, streams, count=None,
-                   block=None, is_credis=False):
+                   block=None, no_ack=False, is_credis=False):
         pieces = ['GROUP', groupname, consumername]
         if count is not None:
             if not isinstance(count, int) or count < 1:
@@ -63,6 +63,8 @@ def xreadgroup(connection, groupname, consumername, streams, count=None,
                                 "integer")
             pieces.append("BLOCK")
             pieces.append(str(block))
+        if no_ack:
+            pieces.append("NOACK")
         if not isinstance(streams, dict) or len(streams) == 0:
             raise DataError('XREADGROUP streams must be a non empty dict')
         pieces.append('STREAMS')
@@ -278,7 +280,7 @@ class Streams(object):
         else:
             r = xreadgroup(self.connection, self.group, self.consumer_name,
                            {k: self.streams[k] for k in requestList},
-                           self.count, self.block_int, self.is_credis)
+                           count=self.count, block=self.block_int, no_ack=self.no_ack, is_credis=self.is_credis)
 
         # Calculate and explore count stats
         new_end_xread = time.time() + 1e-8
