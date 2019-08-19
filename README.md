@@ -1,10 +1,14 @@
 # pystreamredis
 A fast redis stream object for Python
 
+## Install
+
+Compatible with Python 2 and 3. 
+
+    # pip install git+https://github.com/ryanalexanderson/pystreamredis
+
 This repo provides a Streams iterator object for access to interleaved
 messages, sorted by index, one at a time. One creates a Streams object as follows:
-
-.. code-block:: pycon
 
     >>> for this_message in r.streams(Stream0=0, Stream1=None, Stream2="$", Stream3=1530403200000):
     >>>      print(this_message)
@@ -15,8 +19,6 @@ retrieved from epoch time_ms 0 (i.e. the entire message history), Stream1 and St
 messages from the present time, and Stream3 from an arbitrary epoch time (July 1 2018, in this case).
 
 An example of an individual `this_message` output is as follows:
-
-.. code-block:: pycon
 
     >>> print(this_message)
     ('Stream0', b'1529416095111-4', {b'index': b'21'})
