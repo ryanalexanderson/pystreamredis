@@ -7,6 +7,8 @@ Compatible with Python 2 and 3.
 
     # pip install git+https://github.com/ryanalexanderson/pystreamredis
 
+## Usage
+
 This repo provides a Streams iterator object for access to interleaved
 messages, sorted by index, one at a time. One creates a Streams object as follows:
 
