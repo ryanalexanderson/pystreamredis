@@ -49,7 +49,7 @@ def xread(connection, streams, count=None, block=None, is_credis=False):
     pieces.extend(ids)
     try:
       resp = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
-    except redis.exceptions.ConnectionError as e:
+    except ConnectionError as e:
       print(e)
       return None
     resp = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
