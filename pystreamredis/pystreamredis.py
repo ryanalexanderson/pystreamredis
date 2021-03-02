@@ -8,6 +8,7 @@ from collections import deque, Container, Mapping
 from sys import getsizeof
 
 from redis import DataError
+from redis.exceptions import ConnectionError
 
 logging.basicConfig(
          format='%(asctime)s %(levelname)-8s %(message)s',
@@ -46,6 +47,11 @@ def xread(connection, streams, count=None, block=None, is_credis=False):
         ids.append(partial_stream[1])
 
     pieces.extend(ids)
+    try:
+      resp = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
+    except redis.exceptions.ConnectionError as e:
+      print(e)
+      return None
     resp = connection.execute('XREAD', *pieces) if is_credis else connection.execute_command('XREAD', *pieces)
     return resp
 
