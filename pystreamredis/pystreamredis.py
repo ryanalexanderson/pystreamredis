@@ -369,7 +369,7 @@ class Streams(object):
             self.remove_from_limit = []
 
         # Perhaps bypass this bs if it's just one stream
-       for stream_name, record_list in self.buffer_dict.items():
+        for stream_name, record_list in self.buffer_dict.items():
             if len(record_list):
                 candidate_lowest_str, candidate_index_str = record_list[0][0].split(b'-')
                 if candidate_lowest_str < lowest_timestamp_str:
@@ -380,7 +380,7 @@ class Streams(object):
                     if int(candidate_index_str) < lowest_index:
                         lowest_index = int(candidate_index_str)
                         lowest_stream = stream_name
-       return lowest_timestamp_str, lowest_index, lowest_stream
+        return lowest_timestamp_str, lowest_index, lowest_stream
 
     def nack(self):
         if self.current_id is None:
